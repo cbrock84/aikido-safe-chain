@@ -9,32 +9,126 @@ export function engineMarker(engine) {
   return `<!-- security-scan:engine=${engine} -->`;
 }
 
+/** Transient server-side failures worth another attempt. */
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+/**
+ * Sleeping longer than this in a single wait is worse than failing: a CI job
+ * idling for GitHub's hourly primary-limit reset burns runner minutes and
+ * hides the problem. Past this we fail with the reset time in the message.
+ */
+const MAX_SLEEP_MS = 60_000;
+
+/**
+ * GitHub signals a spent rate limit in more than one way: 429, or a 403 whose
+ * remaining-requests header has reached zero. Treating only 429 as rate
+ * limiting would turn the common case into a hard failure mid-sweep.
+ * @param {Response} response
+ */
+export function isRetryableResponse(response) {
+  if (RETRYABLE_STATUS.has(response.status)) return true;
+  return (
+    response.status === 403 &&
+    response.headers?.get?.("x-ratelimit-remaining") === "0"
+  );
+}
+
+/**
+ * How long to wait before the next attempt, preferring what the server tells
+ * us over our own guess.
+ * @param {Response} response
+ * @param {number} attempt zero-based
+ * @param {number} now epoch ms, injectable for tests
+ */
+export function retryDelayMs(response, attempt, now = Date.now()) {
+  const retryAfter = Number(response.headers?.get?.("retry-after"));
+  if (Number.isFinite(retryAfter) && retryAfter > 0) {
+    return retryAfter * 1000;
+  }
+
+  const reset = Number(response.headers?.get?.("x-ratelimit-reset"));
+  if (
+    response.headers?.get?.("x-ratelimit-remaining") === "0" &&
+    Number.isFinite(reset)
+  ) {
+    const waitMs = reset * 1000 - now;
+    if (waitMs > 0) return waitMs;
+  }
+
+  // Exponential, so a struggling API is not hammered on every attempt.
+  return Math.min(2 ** attempt * 1000, MAX_SLEEP_MS);
+}
+
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * Minimal GitHub REST client. Octokit would work too, but keeping this
  * dependency-free means the scanner runs from a bare Node install with nothing
  * to audit but our own code - which matters for a tool whose whole job is
  * supply chain hygiene.
+ *
+ * @param {string} token
+ * @param {typeof fetch} fetchImpl
+ * @param {{sleep?: (ms: number) => Promise<void>, maxAttempts?: number, now?: () => number}} options
  */
-export function createClient(token, fetchImpl = fetch) {
-  async function request(method, url, body) {
-    const response = await fetchImpl(url.startsWith("http") ? url : `${API}${url}`, {
-      method,
-      headers: {
-        accept: "application/vnd.github+json",
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json",
-        "x-github-api-version": "2022-11-28",
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+export function createClient(token, fetchImpl = fetch, options = {}) {
+  const sleep = options.sleep ?? defaultSleep;
+  const maxAttempts = options.maxAttempts ?? 5;
+  const now = options.now ?? (() => Date.now());
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`GitHub ${method} ${url} -> ${response.status}: ${text.slice(0, 300)}`);
+  async function request(method, url, body) {
+    const target = url.startsWith("http") ? url : `${API}${url}`;
+    let lastError;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      let response;
+
+      try {
+        response = await fetchImpl(target, {
+          method,
+          headers: {
+            accept: "application/vnd.github+json",
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+            "x-github-api-version": "2022-11-28",
+          },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+      } catch (error) {
+        // A dropped connection mid-sweep should not lose the whole run.
+        lastError = error;
+        if (attempt === maxAttempts - 1) break;
+        await sleep(Math.min(2 ** attempt * 1000, MAX_SLEEP_MS));
+        continue;
+      }
+
+      if (response.ok) {
+        // 204 responses carry no body.
+        return response.status === 204 ? null : response.json();
+      }
+
+      if (!isRetryableResponse(response) || attempt === maxAttempts - 1) {
+        const text = await response.text();
+        throw new Error(
+          `GitHub ${method} ${url} -> ${response.status}: ${text.slice(0, 300)}`
+        );
+      }
+
+      const delay = retryDelayMs(response, attempt, now());
+      if (delay > MAX_SLEEP_MS) {
+        const resetAt = new Date(now() + delay).toISOString();
+        throw new Error(
+          `GitHub ${method} ${url} -> ${response.status}: rate limited until ${resetAt}, ` +
+            `which is longer than this run is willing to wait`
+        );
+      }
+
+      await sleep(delay);
     }
 
-    // 204 responses carry no body.
-    return response.status === 204 ? null : response.json();
+    throw new Error(
+      `GitHub ${method} ${url} failed after ${maxAttempts} attempts: ${lastError?.message ?? "unknown error"}`
+    );
   }
 
   return {

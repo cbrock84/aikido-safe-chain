@@ -21,13 +21,25 @@ permissions:
   contents: read
 
 env:
-  # Pinned so a scan is reproducible and a compromised upstream release cannot
-  # silently land in the pipeline. Bump deliberately.
+  # Pinned by version AND content hash, so a scan is reproducible and a
+  # compromised or re-tagged upstream release cannot silently land in the
+  # pipeline. Bump both together, deliberately.
+  #
+  # The osv-scanner, trivy, gitleaks and syft hashes are taken from each
+  # project's own published checksum file. zizmor publishes no checksum file,
+  # so its hash was computed from the downloaded artifact: that still makes any
+  # future change to the artifact fail loudly, but it is not an independent
+  # authenticity check the way the other four are.
   OSV_SCANNER_VERSION: "2.2.4"
-  TRIVY_VERSION: "0.68.0"
+  OSV_SCANNER_SHA256: "7702cd1e5d9f5059dd9570f4ad967f27d3c5f5391b371ec937b384c238177f55"
+  TRIVY_VERSION: "0.70.0"
+  TRIVY_SHA256: "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"
   GITLEAKS_VERSION: "8.30.0"
+  GITLEAKS_SHA256: "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e"
   SYFT_VERSION: "1.41.1"
+  SYFT_SHA256: "d5ef5af2acebe7f6e60dda19a708fdf4d6f3f49f8d6b2d3e29265c1629f5d121"
   ZIZMOR_VERSION: "1.19.0"
+  ZIZMOR_SHA256: "64dd578889f4c2e277b084060ef47fd98f933723399af9145ae2768aae76a71c"
 
 jobs:
   matrix:
@@ -92,6 +104,50 @@ jobs:
           # artifact could carry it out of the job.
           persist-credentials: false
 
+      # The repo list spans more than one owner, and the most common setup
+      # mistake - a token that exists but is not authorized for the second
+      # org - surfaces from checkout as a bare "repository not found". Say
+      # what is actually wrong instead.
+      - name: Verify token access to ${{ matrix.repo }}
+        env:
+          SCAN_TOKEN: ${{ secrets.SCAN_TOKEN }}
+          TARGET_REPO: ${{ matrix.repo }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SCAN_TOKEN:-}" ]; then
+            echo "::error::SCAN_TOKEN is not set. Add a PAT or GitHub App token with contents:read and issues:write on ${TARGET_REPO}."
+            exit 1
+          fi
+
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${SCAN_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${TARGET_REPO}")
+
+          case "$code" in
+            200)
+              echo "Access to ${TARGET_REPO} confirmed."
+              ;;
+            401)
+              echo "::error::SCAN_TOKEN was rejected (401). It is invalid, revoked or expired."
+              exit 1
+              ;;
+            403)
+              echo "::error::SCAN_TOKEN is forbidden (403) for ${TARGET_REPO}. If that org enforces SAML SSO, the token must be authorized for it."
+              exit 1
+              ;;
+            404)
+              echo "::error::SCAN_TOKEN cannot see ${TARGET_REPO} (404). For a private repo this usually means the token has no access to that owner, rather than that the repo is missing. Check the token covers this org, and for a GitHub App that the app is installed on it."
+              exit 1
+              ;;
+            *)
+              echo "::error::Unexpected HTTP ${code} checking access to ${TARGET_REPO}."
+              exit 1
+              ;;
+          esac
+
       - name: Check out ${{ matrix.repo }}
         uses: actions/checkout@v4
         with:
@@ -113,17 +169,42 @@ jobs:
           mkdir -p "$HOME/.scanbin"
           cd "$HOME/.scanbin"
 
-          curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" -o osv-scanner
+          # Download to a file and verify its hash BEFORE unpacking or running
+          # it. Piping curl straight into tar, as this step used to, executes
+          # whatever the network returned - which is precisely the supply chain
+          # risk this scanner exists to catch.
+          fetch() {
+            local url="$1" file="$2" sha="$3"
+            curl -fsSL --retry 3 --retry-delay 2 "$url" -o "$file"
+            echo "${sha}  ${file}" | sha256sum -c -
+          }
+
+          fetch "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" \
+            osv-scanner "$OSV_SCANNER_SHA256"
           chmod +x osv-scanner
 
-          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" | tar xz trivy
+          fetch "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            trivy.tar.gz "$TRIVY_SHA256"
+          tar xzf trivy.tar.gz trivy
 
-          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz gitleaks
+          fetch "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            gitleaks.tar.gz "$GITLEAKS_SHA256"
+          tar xzf gitleaks.tar.gz gitleaks
 
-          curl -fsSL "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" | tar xz syft
+          fetch "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" \
+            syft.tar.gz "$SYFT_SHA256"
+          tar xzf syft.tar.gz syft
 
-          pipx install "zizmor==${ZIZMOR_VERSION}"
+          # The release binary rather than pipx: pip installs are not content
+          # verified, so a pinned version alone would not detect a re-published
+          # artifact.
+          fetch "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz" \
+            zizmor.tar.gz "$ZIZMOR_SHA256"
+          # This archive stores its member as "./zizmor", unlike the others.
+          tar xzf zizmor.tar.gz ./zizmor
 
+          rm -f ./*.tar.gz
+          chmod +x osv-scanner trivy gitleaks syft zizmor
           echo "$HOME/.scanbin" >> "$GITHUB_PATH"
 
       - name: Verify engines are runnable

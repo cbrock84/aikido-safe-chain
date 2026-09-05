@@ -43,7 +43,7 @@ rather than patching `src/engines.mjs`.
 
 ```bash
 cd security-scanner
-npm test                                   # 75 tests, no network, no binaries
+npm test                                   # 86 tests, no network, no binaries
 
 # Scan a local checkout without touching GitHub
 node src/index.mjs scan --repo owner/name --dir /path/to/checkout
@@ -87,6 +87,23 @@ with, on every target repo:
 The default `GITHUB_TOKEN` is not enough: it is scoped to the repo the workflow
 runs in, and this scanner runs centrally against many.
 
+### Scanning across more than one owner
+
+The repo list may span several owners, and a single token has to cover all of
+them. The usual mistake is a token that works for one org and silently not the
+other. GitHub reports that as a **404 rather than a 403**, so it reads as "no
+such repo" when the repo is simply invisible to the token.
+
+The workflow runs an access preflight before each checkout and turns that into
+a message naming the real cause. Two things to check when it fires:
+
+- A **PAT** must be granted the second org, and if that org enforces SAML SSO
+  the token must additionally be *authorized* for it.
+- A **GitHub App** token only covers orgs the app is actually installed on.
+
+Because the matrix runs with `fail-fast: false`, one inaccessible repo fails
+only its own job; the rest of the sweep still completes.
+
 ## SARIF upload
 
 Optional and off by default. Uploading goes through the code scanning API rather
@@ -124,6 +141,12 @@ file does not close and reopen every issue in it.
 **Scanner exit codes are not failure.** Most of these tools exit non-zero to mean
 "findings present". Success is judged by whether usable output was produced.
 
+**The GitHub API is retried with backoff.** Rate limits arrive as a 429 *or* a
+403 with no remaining quota, and both are retried, preferring the server's own
+`retry-after` or reset time over a guess. Ordinary 4xx responses are not
+retried, and a reset further out than a minute fails with the reset time rather
+than idling a CI runner for an hour.
+
 **`--fail-on` is opt-in.** A daily sweep records findings without failing; a
 pre-merge gate wants the opposite. An unrecognized severity is a hard error
 (exit 1) rather than a gate that fails on everything. A breached gate exits 2.
@@ -139,18 +162,33 @@ The scanner invokes no safe-chain code and does not link against it — safe-cha
 is installed separately into CI via its own installer. Keeping them at arm's
 length means this tool carries none of safe-chain's licensing constraints.
 
+## Engine downloads
+
+Every engine binary is pinned by **version and sha256**, downloaded to a file
+and verified before it is unpacked or executed. The previous
+`curl ... | tar xz` form ran whatever the network returned, which is exactly
+the supply chain risk this scanner exists to catch.
+
+The osv-scanner, trivy, gitleaks and syft hashes come from each project's own
+published checksum file. zizmor publishes no checksum file, so its hash was
+computed from the downloaded artifact: that still makes any future change to
+the artifact fail loudly, but it is not an independent authenticity check the
+way the other four are.
+
+To bump an engine, change its version **and** its hash together. A mismatch
+fails the job rather than scanning with an unexpected binary.
+
 ## Hardening backlog
 
 Known gaps, listed rather than hidden:
 
-- Engine downloads in the workflow are version-pinned but not checksum-pinned.
-  Add `sha256sum -c` for each before relying on this in anger.
-- No rate-limit backoff on the GitHub API. Fine for tens of repos; add retry
-  with backoff before scaling to hundreds.
-- `zizmor`'s online audits query the GitHub API and abort with 401 rather than
-  degrading if no token is present. The workflow passes `GH_TOKEN`; for local
-  runs without one, add `--offline` to its args via `engineOverrides`.
 - `checkov` and `opengrep` are wired up but untuned; enabling them as-is will be
   noisy until you supply a rule policy.
 - Findings are not persisted between runs, so "first seen" dates come from the
   issue's own creation date rather than the scanner.
+- Engine downloads are not signature-verified (cosign/sigstore) even where
+  upstream publishes signatures; hashes catch tampering after the fact but do
+  not establish provenance.
+- `zizmor`'s online audits query the GitHub API and abort with 401 rather than
+  degrading if no token is present. The workflow passes `GH_TOKEN`; for local
+  runs without one, add `--offline` to its args via `engineOverrides`.
