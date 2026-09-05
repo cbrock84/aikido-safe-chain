@@ -25,7 +25,9 @@ ARG NODE_VERSION=latest
 ARG NPM_VERSION=latest
 ARG YARN_VERSION=latest
 ARG PNPM_VERSION=latest
-ARG RUSH_VERSION=latest
+# Pinned: @microsoft/rush@5.179.0 (published 2026-09-05) cannot be installed by
+# volta and breaks this image build. 5.178.1 is the last known-good release.
+ARG RUSH_VERSION=5.178.1
 ARG PYTHON_VERSION=3
 
 SHELL ["/bin/bash", "-c"]
