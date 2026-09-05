@@ -102,11 +102,20 @@ export function issueBody(finding) {
   lines.push("", "---", "", finding.description || "_No further detail provided._");
 
   if (finding.fixedVersion && finding.package) {
+    // Engines list one fix per affected major line, so a multi-major package
+    // comes back as "1.1.16, 2.1.2, 5.0.7". Telling someone to upgrade to all
+    // three would be nonsense - name them and let the reader pick their line.
+    const versions = finding.fixedVersion
+      .split(",")
+      .map((version) => version.trim())
+      .filter(Boolean);
+
+    lines.push("", "### Suggested fix", "");
     lines.push(
-      "",
-      "### Suggested fix",
-      "",
-      `Upgrade \`${finding.package}\` to \`${finding.fixedVersion}\` or later.`
+      versions.length > 1
+        ? `Fixed in ${versions.map((v) => `\`${v}\``).join(", ")}. Upgrade ` +
+            `\`${finding.package}\` to whichever matches the major version you are on.`
+        : `Upgrade \`${finding.package}\` to \`${versions[0]}\` or later.`
     );
   }
 

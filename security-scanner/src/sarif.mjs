@@ -40,7 +40,7 @@ export function findingsFromSarif(sarif, context) {
 
     for (const result of run?.results ?? []) {
       const rule = resolveRule(result, rules);
-      const location = firstLocation(result);
+      const location = firstLocation(result, context.baseDir);
 
       const finding = {
         repo: context.repo,
@@ -137,12 +137,12 @@ function resolveDescription(result, rule) {
   );
 }
 
-function firstLocation(result) {
+function firstLocation(result, baseDir) {
   const physical = result?.locations?.[0]?.physicalLocation;
   const uri = physical?.artifactLocation?.uri ?? "";
 
   return {
-    file: normalizeUri(uri),
+    file: normalizeUri(uri, baseDir),
     startLine: physical?.region?.startLine,
   };
 }
@@ -153,11 +153,23 @@ function firstLocation(result) {
  * human, so reduce all three to a repo-relative path.
  * @param {string} uri
  */
-export function normalizeUri(uri) {
+export function normalizeUri(uri, baseDir) {
   let path = String(uri ?? "").replace(/^file:\/\//, "");
 
-  // Strip the ephemeral checkout directory so paths stay stable between runs.
-  path = path.replace(/^.*?\/__scan__\/[^/]+\//, "");
+  // Engines report absolute paths inside whatever directory was scanned. That
+  // directory differs between a laptop and a CI runner, so leaving it in would
+  // both read badly in an issue and change the fingerprint of an unchanged
+  // finding depending on where the scan ran.
+  if (baseDir) {
+    const prefix = String(baseDir).replace(/\/+$/, "");
+    if (path === prefix) {
+      path = "";
+    } else if (path.startsWith(prefix + "/")) {
+      path = path.slice(prefix.length + 1);
+    }
+  }
+
+  // Fall back to known CI layouts when the scan directory was not supplied.
   path = path.replace(/^\/?(github\/workspace|home\/runner\/work\/[^/]+\/[^/]+)\//, "");
 
   return path.replace(/^\.\//, "").replace(/^\/+/, "");
@@ -179,7 +191,96 @@ function packageFacts(result, rule) {
   if (version) facts.version = String(version);
   if (fixed) facts.fixedVersion = String(fixed);
 
+  // osv-scanner puts coordinates only in the message text - it emits no result
+  // properties at all - so without this every one of its findings would lose
+  // its package identity. That degrades the issue text and, worse, weakens the
+  // fingerprint: two packages hit by the same CVE in one lockfile would
+  // otherwise collide into a single finding.
+  if (!facts.package) {
+    const parsed = packageFromMessage(result?.message?.text);
+    if (parsed) {
+      facts.package = parsed.name;
+      facts.version = parsed.version;
+    }
+  }
+
+  // "Upgrade to X" is the whole point of the issue, and osv-scanner leaves
+  // result.fixes empty while documenting the fix in a markdown table in the
+  // rule help. Recovering it turns "you have a vulnerability" into an
+  // actionable instruction.
+  if (!facts.fixedVersion && facts.package) {
+    const fixedVersion = fixedVersionFromHelp(rule?.help?.text, facts.package);
+    if (fixedVersion) facts.fixedVersion = fixedVersion;
+  }
+
   return facts;
+}
+
+/**
+ * Pulls a package's fixed version out of osv-scanner's "Fixed Versions" table:
+ *
+ *   | Vulnerability ID | Package Name | Fixed Version |
+ *   | --- | --- | --- |
+ *   | GHSA-23hp-3jrh-7fpw | tar | 7.5.19 |
+ *
+ * One rule can list several packages, so the row is matched by package name
+ * rather than simply taking the first - otherwise a multi-package advisory
+ * would recommend the wrong upgrade.
+ *
+ * @param {string | undefined} helpText
+ * @param {string} packageName
+ * @returns {string | null}
+ */
+export function fixedVersionFromHelp(helpText, packageName) {
+  if (!helpText || !packageName) return null;
+
+  const section = helpText.split(/###\s*Fixed Versions/i)[1];
+  if (!section) return null;
+
+  for (const line of section.split("\n")) {
+    const cells = line.split("|").map((cell) => cell.trim());
+    // A data row is: "", id, package, version, "" once split on the pipes.
+    if (cells.length < 5) continue;
+    if (cells[2] !== packageName) continue;
+
+    const version = cells[3];
+    // Skip the header separator row and anything that is not a version.
+    if (!version || /^-+$/.test(version) || /fixed version/i.test(version)) continue;
+
+    return version;
+  }
+
+  return null;
+}
+
+/**
+ * Recovers "name@version" from an engine's human-readable message.
+ *
+ * Deliberately narrow: it only matches quoted coordinates in the phrasings
+ * engines actually emit, so an unrelated message mentioning an @ sign does not
+ * silently invent a package.
+ *
+ * @param {string | undefined} text
+ * @returns {{name: string, version: string} | null}
+ */
+export function packageFromMessage(text) {
+  if (!text) return null;
+
+  const patterns = [
+    // osv-scanner: Package 'tar@7.5.2' is vulnerable to 'CVE-...'
+    /Package '([^']+)@([^'@]+)' is vulnerable/i,
+    // Generic: package "foo@1.2.3"
+    /\bpackage ["']([^"']+)@([^"'@]+)["']/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1] && match[2]) {
+      return { name: match[1], version: match[2] };
+    }
+  }
+
+  return null;
 }
 
 function firstLine(text) {

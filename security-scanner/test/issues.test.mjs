@@ -211,3 +211,18 @@ test("pull requests returned by the issues endpoint are ignored", async () => {
   // The PR must not be treated as an existing issue, so the finding is new.
   assert.equal(summary.created, 1);
 });
+
+test("a single fix version reads as a plain upgrade instruction", () => {
+  const body = issueBody(makeFinding({ fixedVersion: "7.5.19" }));
+  assert.match(body, /Upgrade `lodash` to `7\.5\.19` or later\./);
+});
+
+test("multiple fix versions are listed rather than run together", () => {
+  // osv-scanner returns one fix per affected major line; "upgrade to
+  // 1.1.16, 2.1.2, 5.0.7 or later" would be nonsense.
+  const body = issueBody(makeFinding({ fixedVersion: "1.1.16, 2.1.2, 5.0.7" }));
+
+  assert.match(body, /Fixed in `1\.1\.16`, `2\.1\.2`, `5\.0\.7`/);
+  assert.match(body, /whichever matches the major version you are on/);
+  assert.doesNotMatch(body, /1\.1\.16, 2\.1\.2, 5\.0\.7` or later/);
+});

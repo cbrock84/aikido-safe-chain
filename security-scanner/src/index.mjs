@@ -95,7 +95,13 @@ export async function scanCheckout(repoConfig, engines, context) {
     try {
       const document = await readJson(result.outputPath);
       sarifDocs.push(document);
-      findings.push(...findingsFromSarif(document, { repo: repoConfig.name, engine: name }));
+      findings.push(
+        ...findingsFromSarif(document, {
+          repo: repoConfig.name,
+          engine: name,
+          baseDir: context.dir,
+        })
+      );
     } catch (error) {
       failures.push({ engine: name, error: `Unreadable SARIF: ${error.message}` });
     }
