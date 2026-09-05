@@ -43,7 +43,7 @@ rather than patching `src/engines.mjs`.
 
 ```bash
 cd security-scanner
-npm test                                   # 58 tests, no network, no binaries
+npm test                                   # 75 tests, no network, no binaries
 
 # Scan a local checkout without touching GitHub
 node src/index.mjs scan --repo owner/name --dir /path/to/checkout
@@ -106,6 +106,11 @@ fail the run — the issues are already synced by that point.
 remove-immediately guidance, the other two are medium and framed as policy
 judgements. An unrecognized verdict is surfaced as medium rather than dropped.
 
+**"Nothing to scan" is not a failure.** Some engines write no output at all
+when a repo has no manifests (osv-scanner exits 128). That is a clean empty
+result, declared per engine via `noFindingsExitCodes`. Treating it as a failure
+would be actively harmful, because of the next rule.
+
 **A failed engine never closes issues.** An engine that crashes or is missing
 reports zero findings, which must not be read as "everything it previously
 reported is fixed". Only issues belonging to engines that completed this run are
@@ -142,6 +147,9 @@ Known gaps, listed rather than hidden:
   Add `sha256sum -c` for each before relying on this in anger.
 - No rate-limit backoff on the GitHub API. Fine for tens of repos; add retry
   with backoff before scaling to hundreds.
+- `zizmor`'s online audits query the GitHub API and abort with 401 rather than
+  degrading if no token is present. The workflow passes `GH_TOKEN`; for local
+  runs without one, add `--offline` to its args via `engineOverrides`.
 - `checkov` and `opengrep` are wired up but untuned; enabling them as-is will be
   noisy until you supply a rule policy.
 - Findings are not persisted between runs, so "first seen" dates come from the

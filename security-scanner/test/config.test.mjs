@@ -111,3 +111,65 @@ test("merging SARIF keeps one run per engine", () => {
   assert.equal(merged.runs.length, 2);
   assert.equal(merged.version, "2.1.0");
 });
+
+test("an engine that exits with a declared no-op code counts as a clean empty run", async () => {
+  // osv-scanner exits 128 and writes nothing when a repo has no manifests.
+  // Treating that as a failure would be actively harmful: a failed engine is
+  // never allowed to close issues, so a repo that removed its last lockfile
+  // would keep stale issues open forever.
+  const outDir = await mkdtemp(path.join(tmpdir(), "scan-"));
+  const result = await runEngine(
+    "no-sources",
+    {
+      bin: process.execPath,
+      args: ["-e", "process.exit(128)"],
+      output: "sarif",
+      noFindingsExitCodes: [128],
+    },
+    { dir: process.cwd(), outDir }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.empty, true);
+
+  const sarif = JSON.parse(await readFile(result.outputPath, "utf8"));
+  assert.deepEqual(sarif.runs[0].results, [], "should synthesize a valid empty SARIF");
+});
+
+test("an undeclared exit code with no output is still a failure", async () => {
+  const outDir = await mkdtemp(path.join(tmpdir(), "scan-"));
+  const result = await runEngine(
+    "crasher",
+    {
+      bin: process.execPath,
+      args: ["-e", "process.exit(3)"],
+      output: "sarif",
+      noFindingsExitCodes: [128],
+    },
+    { dir: process.cwd(), outDir }
+  );
+
+  assert.equal(result.ok, false, "a real crash must not be mistaken for an empty result");
+});
+
+test("the no-op exit path also covers stdout-based engines", async () => {
+  const outDir = await mkdtemp(path.join(tmpdir(), "scan-"));
+  const result = await runEngine(
+    "quiet",
+    {
+      bin: process.execPath,
+      args: ["-e", "process.exit(128)"],
+      output: "sarif",
+      stdout: true,
+      noFindingsExitCodes: [128],
+    },
+    { dir: process.cwd(), outDir }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.empty, true);
+});
+
+test("osv-scanner declares 128 as its no-findings code", () => {
+  assert.ok(DEFAULT_ENGINES["osv-scanner"].noFindingsExitCodes.includes(128));
+});

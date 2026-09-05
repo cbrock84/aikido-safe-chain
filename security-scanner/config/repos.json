@@ -10,9 +10,8 @@
   },
   "engineOverrides": {},
   "repos": [
-    {
-      "name": "cbrock84/aikido-safe-chain",
-      "branch": "main"
-    }
+    { "name": "cbrock84/headcount", "branch": "main" },
+    { "name": "keel-GRC/keelgrc-v1", "branch": "main" },
+    { "name": "keel-GRC/keel-mcp", "branch": "main" }
   ]
 }

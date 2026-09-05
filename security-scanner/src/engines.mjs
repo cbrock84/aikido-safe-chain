@@ -17,6 +17,11 @@ export const DEFAULT_ENGINES = {
     bin: "osv-scanner",
     args: ["scan", "source", "--recursive", "--format", "sarif", "--output", "{out}", "{dir}"],
     output: "sarif",
+    // 128 is "no package sources found" - a clean no-op on a repo with no
+    // manifests, not a failure. Without this the engine would be marked failed,
+    // and since a failed engine is never allowed to close issues, a repo that
+    // removed its last lockfile would keep stale issues open forever.
+    noFindingsExitCodes: [128],
     description: "Dependency vulnerabilities from osv.dev",
   },
   trivy: {
@@ -39,7 +44,11 @@ export const DEFAULT_ENGINES = {
     args: ["--format", "sarif", "{dir}"],
     output: "sarif",
     stdout: true,
-    description: "GitHub Actions workflow security",
+    // Several zizmor audits query the GitHub API (e.g. ref-confusion resolves
+    // an action's branches). Without GH_TOKEN it aborts with 401 rather than
+    // degrading, so the workflow passes a token. For local runs without one,
+    // add "--offline" via engineOverrides to skip the online audits.
+    description: "GitHub Actions workflow security (needs GH_TOKEN for online audits)",
   },
   syft: {
     bin: "syft",
@@ -136,6 +145,11 @@ export async function runEngine(name, definition, context) {
 
   if (definition.stdout) {
     if (!result.stdout.trim()) {
+      if ((definition.noFindingsExitCodes ?? []).includes(result.code)) {
+        await writeFile(outputPath, JSON.stringify(EMPTY_SARIF));
+        return { name, ok: true, outputPath, output: definition.output, empty: true };
+      }
+
       return { name, ok: false, error: describeEmpty(name, result) };
     }
     await writeFile(outputPath, result.stdout);
@@ -145,11 +159,25 @@ export async function runEngine(name, definition, context) {
   try {
     await readFile(outputPath);
   } catch {
+    // Some engines write nothing at all when there is nothing to scan. That is
+    // a successful empty result, so synthesize one rather than reporting a
+    // failure - downstream code then sees a normal zero-finding run.
+    if ((definition.noFindingsExitCodes ?? []).includes(result.code)) {
+      await writeFile(outputPath, JSON.stringify(EMPTY_SARIF));
+      return { name, ok: true, outputPath, output: definition.output, empty: true };
+    }
+
     return { name, ok: false, error: describeEmpty(name, result) };
   }
 
   return { name, ok: true, outputPath, output: definition.output };
 }
+
+/** A valid SARIF document reporting nothing, used for clean empty results. */
+const EMPTY_SARIF = {
+  version: "2.1.0",
+  runs: [{ tool: { driver: { name: "security-scanner" } }, results: [] }],
+};
 
 function describeEmpty(name, result) {
   const detail = result.stderr.trim().split("\n").slice(-3).join(" ").slice(0, 300);
