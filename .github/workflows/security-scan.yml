@@ -1,0 +1,145 @@
+name: Daily security scan
+
+# Sweeps every repo listed in security-scanner/config/repos.json, then opens,
+# updates and closes GitHub issues to match what the scanners currently find.
+on:
+  schedule:
+    # 05:30 UTC daily - off the hour, since :00 is heavily contended on GitHub's
+    # scheduler and delays scheduled runs.
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Scan only this repo (owner/name). Leave blank for all."
+        required: false
+      dry-run:
+        description: "Plan issue changes without writing them"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  # Pinned so a scan is reproducible and a compromised upstream release cannot
+  # silently land in the pipeline. Bump deliberately.
+  OSV_SCANNER_VERSION: "2.2.4"
+  TRIVY_VERSION: "0.68.0"
+  GITLEAKS_VERSION: "8.30.0"
+  SYFT_VERSION: "1.41.1"
+  ZIZMOR_VERSION: "1.19.0"
+
+jobs:
+  matrix:
+    name: Build repo matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - id: build
+        run: |
+          set -euo pipefail
+          MATRIX=$(node security-scanner/src/index.mjs list --config security-scanner/config/repos.json)
+
+          # A manual run can narrow the sweep to a single repo.
+          if [ -n "${{ inputs.repo }}" ]; then
+            MATRIX=$(echo "$MATRIX" | node -e "
+              const wanted = process.argv[1];
+              const data = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+              const include = data.include.filter((entry) => entry.repo === wanted);
+              if (include.length === 0) {
+                console.error('Repo ' + wanted + ' is not in the config');
+                process.exit(1);
+              }
+              console.log(JSON.stringify({ include }));
+            " "${{ inputs.repo }}")
+          fi
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Scanning: $MATRIX"
+
+  scan:
+    name: Scan ${{ matrix.repo }}
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      # One repo's failure must not cancel the rest of the sweep.
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.matrix.outputs.matrix) }}
+    steps:
+      - name: Check out the scanner
+        uses: actions/checkout@v4
+        with:
+          path: scanner
+
+      - name: Check out ${{ matrix.repo }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ matrix.branch }}
+          path: target
+          token: ${{ secrets.SCAN_TOKEN }}
+          # Full history is not needed and is slow on large repos.
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install scan engines
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.scanbin"
+          cd "$HOME/.scanbin"
+
+          curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" -o osv-scanner
+          chmod +x osv-scanner
+
+          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" | tar xz trivy
+
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz gitleaks
+
+          curl -fsSL "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" | tar xz syft
+
+          pipx install "zizmor==${ZIZMOR_VERSION}"
+
+          echo "$HOME/.scanbin" >> "$GITHUB_PATH"
+
+      - name: Verify engines are runnable
+        run: |
+          set -euo pipefail
+          osv-scanner --version
+          trivy --version
+          gitleaks version
+          syft version
+          zizmor --version
+
+      - name: Scan and sync issues
+        env:
+          # Needs contents:read on the target repo plus issues:write to file
+          # findings there. Add security_events:write only for repos that set
+          # uploadSarif.
+          GITHUB_TOKEN: ${{ secrets.SCAN_TOKEN }}
+        run: |
+          node scanner/security-scanner/src/index.mjs run \
+            --config scanner/security-scanner/config/repos.json \
+            --repo "${{ matrix.repo }}" \
+            --dir target \
+            --out scan-out \
+            ${{ inputs.dry-run && '--dry-run' || '' }}
+
+      - name: Upload findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: findings-${{ strategy.job-index }}
+          path: scan-out/
+          retention-days: 30

@@ -1,0 +1,16 @@
+{
+  "name": "security-scanner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-engine security scanner: runs OSS scanners across selected repos, normalizes findings to a common schema, and syncs them to GitHub issues.",
+  "bin": {
+    "security-scanner": "src/index.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

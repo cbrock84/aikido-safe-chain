@@ -1,0 +1,18 @@
+{
+  "defaults": {
+    "engines": ["osv-scanner", "trivy", "gitleaks", "zizmor", "syft"],
+    "issueThreshold": "high",
+    "digestThreshold": "low",
+    "issueStrategy": "hybrid",
+    "label": "security-scan",
+    "malware": true,
+    "uploadSarif": false
+  },
+  "engineOverrides": {},
+  "repos": [
+    {
+      "name": "cbrock84/aikido-safe-chain",
+      "branch": "main"
+    }
+  ]
+}
