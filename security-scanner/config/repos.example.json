@@ -1,0 +1,37 @@
+{
+  "//": "Every key under defaults can be overridden per repo.",
+  "defaults": {
+    "engines": ["osv-scanner", "trivy", "gitleaks", "zizmor", "syft"],
+    "issueThreshold": "high",
+    "digestThreshold": "low",
+    "issueStrategy": "hybrid",
+    "label": "security-scan",
+    "malware": true,
+    "malwareFeedBaseUrl": "https://malware-list.aikido.dev",
+    "uploadSarif": false
+  },
+
+  "//engineOverrides": "Scanner CLIs change flags between majors. Override argv here instead of patching src/engines.mjs.",
+  "engineOverrides": {
+    "osv-scanner": {
+      "args": ["scan", "source", "--recursive", "--format", "sarif", "--output", "{out}", "{dir}"]
+    }
+  },
+
+  "repos": [
+    { "name": "acme/api", "branch": "main" },
+    {
+      "name": "acme/payments",
+      "branch": "main",
+      "issueThreshold": "medium",
+      "engines": ["osv-scanner", "trivy", "gitleaks", "syft", "checkov"],
+      "uploadSarif": true
+    },
+    {
+      "name": "acme/docs-site",
+      "branch": "main",
+      "issueStrategy": "digest",
+      "engines": ["osv-scanner", "syft"]
+    }
+  ]
+}

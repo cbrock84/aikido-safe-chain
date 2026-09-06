@@ -1,0 +1,38 @@
+name: security-scanner tests
+
+# The scanner is standalone (no dependencies, no workspace membership) so that
+# it can be lifted into its own repository later. That also means the repo's
+# existing test job does not cover it - hence this workflow.
+on:
+  pull_request:
+    paths:
+      - "security-scanner/**"
+      - ".github/workflows/security-scanner-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "security-scanner/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: security-scanner
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Test
+        run: npm test
+
+      - name: Lint
+        run: npx --yes oxlint@1.22.0 --deny-warnings .
