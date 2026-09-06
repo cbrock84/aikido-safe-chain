@@ -216,6 +216,12 @@ jobs:
           syft version
           zizmor --version
 
+      - name: Name outputs after the repo
+        id: slug
+        env:
+          TARGET_REPO: ${{ matrix.repo }}
+        run: echo "value=${TARGET_REPO//\//-}" >> "$GITHUB_OUTPUT"
+
       - name: Scan and sync issues
         env:
           # Needs contents:read on the target repo plus issues:write to file
@@ -244,6 +250,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: findings-${{ strategy.job-index }}
+          # Named by repo rather than job index: with several targets,
+          # "findings-0" tells you nothing about which repo you are opening.
+          # Slashes are not allowed in artifact names, so the owner separator
+          # becomes a dash.
+          name: findings-${{ steps.slug.outputs.value }}
           path: scan-out/
           retention-days: 30
+          # The scan is skipped when the access preflight fails, leaving no
+          # output. That is an expected outcome, not something to warn about
+          # on every run until a token is configured.
+          if-no-files-found: ignore
